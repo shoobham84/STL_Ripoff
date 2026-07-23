@@ -1,6 +1,6 @@
 #include <cstddef>
 
-namespace pi {
+namespace Pi {
 
 	template<typename _Tp>
 	class Vector {
@@ -8,9 +8,9 @@ namespace pi {
 		using value_type = _Tp;
 		using pointer = _Tp *;
 		using const_pointer_type = const _Tp *;
-		using m_size_type = size_t;
-		using size_type = ptrdiff_t;
-		using difference_type = ptrdiff_t;
+		using m_size_type = std::size_t;
+		using size_type = std::size_t;
+		using difference_type = std::ptrdiff_t;
 
 	public:
 		Vector() = default;
