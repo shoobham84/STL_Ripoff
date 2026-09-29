@@ -4,6 +4,8 @@
 #include <cstring>
 #include <string_view>
 #include <compare>
+#include <algorithm>
+#include <iterator>
 
 namespace moo 
 {
@@ -35,11 +37,14 @@ struct control_block {
 };
 
 
+template<typename T>
+concept TCDASL = requires(T) {
+	std::is_trivially_copyable_v<T> && std::is_trivially_default_constructible_v<T> && std::is_standard_layout_v<T>;
+};
 
-template<typename T, typename Allocator = std::allocator<T>>
+template<TCDASL T, typename Allocator = std::allocator<T>>
 class basic_string_cow
 {
-	static_assert(std::is_trivially_copyable_v<T> && std::is_trivially_default_constructible_v<T> && std::is_standard_layout_v<T>);
 
 public:
 	using value_type = T;
@@ -49,6 +54,8 @@ public:
 	using size_type = std::size_t;
 	using const_reference = const T&;
 	using reference_type = T&;
+	using iterator = pointer_type;
+	using const_iterator = const_pointer;
 	
 	static const size_type npos = static_cast<size_type>(-1);
 
@@ -114,6 +121,22 @@ public:
 		m_cb->data()[str_size] = static_cast<value_type>(0);
 	}
 
+	// =========== Iterators =========
+	constexpr const_iterator cbegin() const {
+		return m_cb->data();
+	}
+
+	constexpr iterator begin() {
+		return m_cb->data();
+	}
+
+	constexpr const_iterator cend() const {
+		return m_cb->data[m_cb->size];
+	}
+
+	constexpr const_iterator end() {
+		return m_cb->data[m_cb->size];
+	}
 
 	// ========== Operator Overloads ==========
 	[[nodiscard]] constexpr const_reference operator[](size_type pos) const noexcept {
@@ -136,7 +159,7 @@ public:
 	}
 
 	constexpr operator std::basic_string_view<value_type>() const noexcept {
-		return std::basic_string_view<value_type>(m_cb->data(), m_cb->size());
+		return std::basic_string_view<value_type>(m_cb->data(), m_cb->size);
 	}
 	
 	// ========== Methods ==========
@@ -152,13 +175,47 @@ public:
 		return m_cb->data();
 	}
 
-	
+	bool empty() const {
+		return (begin() == end());
+	}
+
+	constexpr size_type length() const {
+		return std::distance(begin(), end());
+	}
+
+	void clear() noexcept {
+		if (m_cb != control_block<value_type>::empty_instance()) {
+			if (--m_cb->reference_count == 0) deallocate_block(m_cb);
+		}
+		m_cb = control_block<value_type>::empty_instance();
+	}
+
+
+	void reserve(size_type newCap) {
+		if (newCap > m_cb->capacity || m_cb->reference_count > 1) 
+			detach(newCap);
+	}
 
 
 private:
 	control_block<value_type> *m_cb;
 
-	void detach();
+private:
+	void detach(size_type m_minCapacity = 0) {
+		if (m_cb->reference_count == 1 && m_cb->capacity >= m_minCapacity) return;
+
+		size_type new_capacity = std::max(m_minCapacity, static_cast<size_type>(m_cb->size));
+		auto *new_cb = allocate_block(new_capacity);
+		new_cb->size = m_cb->size;
+
+		std::memcpy(new_cb->data(), m_cb->data(), (m_cb->size() + 1) * sizeof(value_type));
+
+		if (m_cb != control_block<value_type>::empty_instance()) {
+			if (--m_cb->reference_count == 0) deallocate_block(m_cb);
+		}
+
+		m_cb = new_cb;
+	}
 
 	static constexpr size_type cb_size(size_type capacity) noexcept {
 		return (sizeof(control_block<value_type>) + (capacity + 1) * sizeof(value_type));
@@ -184,7 +241,6 @@ private:
 		byte_alloc_traits::deallocate(alloc, reinterpret_cast<std::byte *>(cb), bytes);
 	}
 };
-
 
 
 
