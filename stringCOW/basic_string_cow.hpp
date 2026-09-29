@@ -2,6 +2,8 @@
 #include <type_traits>
 #include <memory>
 #include <cstring>
+#include <string_view>
+#include <compare>
 
 namespace moo 
 {
@@ -42,10 +44,13 @@ class basic_string_cow
 public:
 	using value_type = T;
 	using pointer_type = T*;
+	using const_pointer = const T*;
 	using alloc_type = Allocator;
 	using size_type = std::size_t;
 	using const_reference = const T&;
 	using reference_type = T&;
+	
+	static const size_type npos = static_cast<size_type>(-1);
 
 private:
 	using byte_alloc_type = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
@@ -57,7 +62,11 @@ public:
 	}
 
 	basic_string_cow(const basic_string_cow& other) 
-	:m_cb(other.m_cb) {}
+	:m_cb(other.m_cb) {
+		if (m_cb != control_block<value_type>::empty_instance()) {
+			m_cb->reference_count++;
+		}
+	}
 
 	basic_string_cow(basic_string_cow&& other) noexcept
 	: m_cb(other.m_cb)
@@ -66,7 +75,7 @@ public:
 	}
 
 	basic_string_cow& operator=(const basic_string_cow& other) {
-		if (this != other && m_cb!= other.m_cb) {
+		if (this != &other && m_cb!= other.m_cb) {
 			if (m_cb != control_block<value_type>::empty_instance()) {
 				if (--m_cb->reference_count == 0) deallocate_block(m_cb);
 			}
@@ -103,31 +112,53 @@ public:
 		m_cb->size = static_cast<uint32_t>(str_size);
 		std::memcpy(m_cb->data(), str, str_size);
 		m_cb->data()[str_size] = static_cast<value_type>(0);
-
-		if (m_cb->capacity < str_size + 1) __builtin_unreachable();  // TODO: Add checks for clang and msvc
 	}
 
 
 	// ========== Operator Overloads ==========
 	[[nodiscard]] constexpr const_reference operator[](size_type pos) const noexcept {
-		static_assert(pos <= m_cb->size);
 		return m_cb->data()[pos];
 	}
 
 	[[nodiscard]] constexpr reference_type operator[](size_type pos) {
-		static_assert(pos <= m_cb->size);
+		detach();
 		return m_cb->data()[pos];
 	}
 
 	[[nodiscard]] friend constexpr auto operator<=>(const basic_string_cow& lhs, const basic_string_cow& rhs) {
-		return lhs.m_cb <=> rhs.m_cb;
+		if (lhs.m_cb == rhs.m_cb) return std::strong_ordering::equal;
+		return std::basic_string_view<value_type>(lhs) <=> std::basic_string_view<value_type>(rhs);
+	}
+
+	[[nodiscard]] friend constexpr auto operator==(const basic_string_cow& lhs, const basic_string_cow& rhs) {
+		if (lhs.m_cb == rhs.m_cb) return true;
+		return std::basic_string_view<value_type>(lhs) == std::basic_string_view<value_type>(rhs);
+	}
+
+	constexpr operator std::basic_string_view<value_type>() const noexcept {
+		return std::basic_string_view<value_type>(m_cb->data(), m_cb->size());
 	}
 	
+	// ========== Methods ==========
+	[[nodiscard]] constexpr size_type size() const noexcept {
+		return m_cb->size;
+	}
+
+	[[nodiscard]] constexpr size_type capacity() const noexcept {
+		return m_cb->capacity;
+	}
+
+	[[nodiscard]] constexpr value_type *c_str() const {
+		return m_cb->data();
+	}
+
 	
 
 
 private:
 	control_block<value_type> *m_cb;
+
+	void detach();
 
 	static constexpr size_type cb_size(size_type capacity) noexcept {
 		return (sizeof(control_block<value_type>) + (capacity + 1) * sizeof(value_type));
