@@ -28,7 +28,10 @@ struct control_block {
 		} empty_block;
 		return &empty_block.cb;
 	}
+
+	auto operator<=>(const control_block&) const = default;
 };
+
 
 
 template<typename T, typename Allocator = std::allocator<T>>
@@ -41,6 +44,8 @@ public:
 	using pointer_type = T*;
 	using alloc_type = Allocator;
 	using size_type = std::size_t;
+	using const_reference = const T&;
+	using reference_type = T&;
 
 private:
 	using byte_alloc_type = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
@@ -51,9 +56,8 @@ public:
 		m_cb = control_block<value_type>::empty_instance();
 	}
 
-	basic_string_cow(const basic_string_cow& other) {
-		m_cb = other.m_cb;
-	}
+	basic_string_cow(const basic_string_cow& other) 
+	:m_cb(other.m_cb) {}
 
 	basic_string_cow(basic_string_cow&& other) noexcept
 	: m_cb(other.m_cb)
@@ -99,7 +103,28 @@ public:
 		m_cb->size = static_cast<uint32_t>(str_size);
 		std::memcpy(m_cb->data(), str, str_size);
 		m_cb->data()[str_size] = static_cast<value_type>(0);
+
+		if (m_cb->capacity < str_size + 1) __builtin_unreachable();  // TODO: Add checks for clang and msvc
 	}
+
+
+	// ========== Operator Overloads ==========
+	[[nodiscard]] constexpr const_reference operator[](size_type pos) const noexcept {
+		static_assert(pos <= m_cb->size);
+		return m_cb->data()[pos];
+	}
+
+	[[nodiscard]] constexpr reference_type operator[](size_type pos) {
+		static_assert(pos <= m_cb->size);
+		return m_cb->data()[pos];
+	}
+
+	[[nodiscard]] friend constexpr auto operator<=>(const basic_string_cow& lhs, const basic_string_cow& rhs) {
+		return lhs.m_cb <=> rhs.m_cb;
+	}
+	
+	
+
 
 private:
 	control_block<value_type> *m_cb;
