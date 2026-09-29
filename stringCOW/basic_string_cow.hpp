@@ -53,7 +53,6 @@ public:
 
 	basic_string_cow(const basic_string_cow& other) {
 		m_cb = other.m_cb;
-		m_cb->reference_count++;
 	}
 
 	basic_string_cow(basic_string_cow&& other) noexcept
@@ -63,13 +62,22 @@ public:
 	}
 
 	basic_string_cow& operator=(const basic_string_cow& other) {
-		basic_string_cow bsc;
-		bsc.m_cb = other.m_cb;
-		return bsc;
+		if (this != other && m_cb!= other.m_cb) {
+			if (m_cb != control_block<value_type>::empty_instance()) {
+				if (--m_cb->reference_count == 0) deallocate_block(m_cb);
+			}
+
+			m_cb = other.m_cb;
+			if (m_cb != control_block<value_type>::empty_instance()) {
+				m_cb->reference_count++;
+			}
+		}
+		return *this;
 	}
 
 	basic_string_cow& operator=(basic_string_cow&& other) noexcept {
-		
+		std::swap(m_cb, other.m_cb);
+		return *this;
 	}
 
 	~basic_string_cow() {
@@ -83,12 +91,14 @@ public:
 	basic_string_cow(const T* str) {
 		if (str == nullptr || std::strcmp(str, "") == 0) {
 			m_cb = control_block<value_type>::empty_instance();
+			return;
 		}
 
 		size_type str_size = std::strlen(str);
 		m_cb = allocate_block(str_size);
 		m_cb->size = static_cast<uint32_t>(str_size);
 		std::memcpy(m_cb->data(), str, str_size);
+		m_cb->data()[str_size] = static_cast<value_type>(0);
 	}
 
 private:
@@ -111,22 +121,13 @@ private:
 	}
 
 
-	static void deallocate_block(control_block<value_type> cb) {
+	static void deallocate_block(control_block<value_type>* cb) {
 		byte_alloc_type alloc;
 		size_type bytes = cb_size(cb->capacity);
 
 		byte_alloc_traits::deallocate(alloc, reinterpret_cast<std::byte *>(cb), bytes);
 	}
 };
-
-
-
-
-
-
-
-
-
 
 
 
