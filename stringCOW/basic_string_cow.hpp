@@ -38,11 +38,9 @@ struct control_block {
 
 
 template<typename T>
-concept TCDASL = requires(T) {
-	std::is_trivially_copyable_v<T> && std::is_trivially_default_constructible_v<T> && std::is_standard_layout_v<T>;
-};
+concept CharacterType = std::is_trivially_copyable_v<T> && std::is_trivially_default_constructible_v<T> && std::is_standard_layout_v<T>;
 
-template<TCDASL T, typename Allocator = std::allocator<T>>
+template<CharacterType T, typename Allocator = std::allocator<T>>
 class basic_string_cow
 {
 
@@ -56,6 +54,7 @@ public:
 	using reference_type = T&;
 	using iterator = pointer_type;
 	using const_iterator = const_pointer;
+	using view_type = std::basic_string_view<value_type>;
 	
 	static const size_type npos = static_cast<size_type>(-1);
 
@@ -122,21 +121,52 @@ public:
 	}
 
 	// =========== Iterators =========
-	constexpr const_iterator cbegin() const {
+	constexpr const_iterator cbegin() const noexcept {
+		return m_cb->data();
+	}
+
+	constexpr iterator begin() const noexcept {
 		return m_cb->data();
 	}
 
 	constexpr iterator begin() {
+		detach();
 		return m_cb->data();
 	}
 
-	constexpr const_iterator cend() const {
+	constexpr const_iterator cend() const noexcept {
 		return m_cb->data() + m_cb->size;
 	}
 
-	constexpr const_iterator end() {
-		return m_cb->data[m_cb->size];
+	constexpr const_iterator end() const noexcept {
+		return m_cb->data + m_cb->size;
 	}
+
+	constexpr const_iterator end() {
+		detach();
+		return m_cb->data + m_cb->size;
+	}
+
+	view_type view() const noexcept {
+		return static_cast<view_type>(*this);
+	}
+
+	bool starts_with(view_type pref) const noexcept {
+		return view().starts_with(pref);
+	}
+
+	bool ends_with(view_type suff) const noexcept {
+		return view().ends_with(suff);
+	}
+
+	bool contains(view_type sv) const noexcept {
+		return view().find(sv) != view_type::npos;
+	}
+
+	size_type find(view_type sv, size_type pos = 0) const noexcept {
+		return view().find(sv, pos);
+	}
+
 
 	// ========== Operator Overloads ==========
 	[[nodiscard]] constexpr const_reference operator[](size_type pos) const noexcept {
@@ -161,6 +191,10 @@ public:
 	constexpr operator std::basic_string_view<value_type>() const noexcept {
 		return std::basic_string_view<value_type>(m_cb->data(), m_cb->size);
 	}
+
+	friend std::ostream& operator<<(std::ostream& out, const basic_string_cow<value_type> str) {
+		return out << str.m_cb->data();
+	}
 	
 	// ========== Methods ==========
 	[[nodiscard]] constexpr size_type size() const noexcept {
@@ -175,12 +209,12 @@ public:
 		return m_cb->data();
 	}
 
-	bool empty() const {
-		return (begin() == end());
+	[[nodiscard]] constexpr bool empty() const noexcept {
+		return m_cb->size == 0;
 	}
 
-	constexpr size_type length() const {
-		return std::distance(begin(), end());
+	constexpr size_type length() const noexcept {
+		return m_cb->size;
 	}
 
 	void clear() noexcept {
