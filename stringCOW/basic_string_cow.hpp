@@ -131,7 +131,7 @@ public:
 	}
 
 	constexpr const_iterator cend() const {
-		return m_cb->data[m_cb->size];
+		return m_cb->data() + m_cb->size;
 	}
 
 	constexpr const_iterator end() {
@@ -197,6 +197,18 @@ public:
 	}
 
 
+	void push_back(value_type chr) {
+		if (m_cb->size >= m_cb->capacity || m_cb->reference_count > 1) {
+			size_type nextCap = m_cb->capacity == 0 ? 4 : m_cb->capacity * 1.5;
+			detach(nextCap);
+		}
+
+		m_cb->data()[m_cb->size] = chr;
+		m_cb->size++;
+		m_cb->data()[m_cb->size] = static_cast<value_type>(0);
+	}
+
+
 private:
 	control_block<value_type> *m_cb;
 
@@ -208,7 +220,7 @@ private:
 		auto *new_cb = allocate_block(new_capacity);
 		new_cb->size = m_cb->size;
 
-		std::memcpy(new_cb->data(), m_cb->data(), (m_cb->size() + 1) * sizeof(value_type));
+		std::memcpy(new_cb->data(), m_cb->data(), (m_cb->size + 1) * sizeof(value_type));
 
 		if (m_cb != control_block<value_type>::empty_instance()) {
 			if (--m_cb->reference_count == 0) deallocate_block(m_cb);
