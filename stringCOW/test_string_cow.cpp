@@ -15,8 +15,8 @@ using str = moo::basic_string_cow<char>;
 // ============================================================
 
 // Type layout: the whole point of COW is a single pointer
-static_assert(sizeof(str) == sizeof(void*),
-    "basic_string_cow should be exactly one pointer wide");
+static_assert(sizeof(str) == 32,
+    "size of moo::string is 32");
 
 // Type aliases are correct
 static_assert(std::is_same_v<str::value_type, char>);

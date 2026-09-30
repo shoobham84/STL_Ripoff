@@ -328,19 +328,20 @@ private:
 
 private:
 	void detach(size_type m_minCapacity = 0) {
-		if (!m_cb->is_shared() && m_cb->capacity >= m_minCapacity) return;
+		if (is_sso()) return;
 
-		size_type new_capacity = std::max(m_minCapacity, static_cast<size_type>(m_cb->size));
-		auto *new_cb = allocate_block(new_capacity);
-		new_cb->size = m_cb->size;
+		if (!m_heap.m_cb->is_shared() && m_heap.capacity >= m_minCapacity) return; 
 
-		std::memcpy(new_cb->data(), m_cb->data(), (m_cb->size + 1) * sizeof(value_type));
+		size_type newCap = std::max(m_minCapacity, m_heap.size);
+		auto *new_cblk = allocate_block(newCap);
+		new_cblk->size = static_cast<uint32_t>(newCap);
 
-		if (m_cb != control_block_type::empty_instance()) {
-			if (m_cb->dec_ref()) deallocate_block(m_cb);
-		}
+		std::memcpy(new_cblk->data(), m_heap.m_cb->data(), (m_heap.size + 1) * sizeof(value_type));
 
-		m_cb = new_cb;
+		if (m_heap.m_cb->dec_ref()) deallocate_block(m_heap.m_cb);
+
+		m_heap.m_cb = new_cblk;
+		m_heap.capacity = newCap;
 	}
 
 	static constexpr size_type cb_size(size_type capacity) noexcept {
