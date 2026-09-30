@@ -1,3 +1,5 @@
+#pragma once
+
 #include <cstdint>
 #include <type_traits>
 #include <memory>
@@ -6,16 +8,19 @@
 #include <compare>
 #include <algorithm>
 #include <iterator>
+#include <atomic>
 
 namespace moo 
 {
 
 
-template<typename charType>
+template<typename charType, bool threadSafe = false>
 struct control_block {
+	using ref_type = std::conditional_t<threadSafe, std::atomic<uint32_t>, uint32_t>;
+
 	uint32_t size;
 	uint32_t capacity;
-	uint32_t reference_count;
+	ref_type reference_count;
 
 	charType *data() {
 		return reinterpret_cast<charType *>(this + 1);
@@ -33,14 +38,40 @@ struct control_block {
 		return &empty_block.cb;
 	}
 
-	auto operator<=>(const control_block&) const = default;
+
+	void inc_ref() noexcept {
+		if constexpr (threadSafe) {
+			reference_count.fetch_add(1, std::memory_order_relaxed);
+		}
+		else {
+			++reference_count;
+		}
+	}
+
+	bool dec_ref() noexcept {
+		if constexpr (threadSafe) {
+			reference_count.fetch_sub(1, std::memory_order_relaxed);
+		}
+		else {
+			return --reference_count == 0;
+		}
+	}
+
+	bool is_shared() const noexcept {
+		if constexpr (threadSafe) {
+			return reference_count.load(std::memory_order_acq_rel) == 1;
+		}
+		else {
+			return reference_count > 1;
+		}
+	}
 };
 
 
 template<typename T>
 concept CharacterType = std::is_trivially_copyable_v<T> && std::is_trivially_default_constructible_v<T> && std::is_standard_layout_v<T>;
 
-template<CharacterType T, typename Allocator = std::allocator<T>>
+template<CharacterType T, typename Allocator = std::allocator<T>, bool threadSafe = false>
 class basic_string_cow
 {
 
@@ -55,6 +86,7 @@ public:
 	using iterator = pointer_type;
 	using const_iterator = const_pointer;
 	using view_type = std::basic_string_view<value_type>;
+	using control_block_type = control_block<value_type, threadSafe>;
 	
 	static const size_type npos = static_cast<size_type>(-1);
 
@@ -64,31 +96,31 @@ private:
 
 public:
 	basic_string_cow() {
-		m_cb = control_block<value_type>::empty_instance();
+		m_cb = control_block_type::empty_instance();
 	}
 
 	basic_string_cow(const basic_string_cow& other) 
 	:m_cb(other.m_cb) {
-		if (m_cb != control_block<value_type>::empty_instance()) {
-			m_cb->reference_count++;
+		if (m_cb != control_block_type::empty_instance()) {
+			m_cb->inc_ref();
 		}
 	}
 
 	basic_string_cow(basic_string_cow&& other) noexcept
 	: m_cb(other.m_cb)
 	{
-		other.m_cb = control_block<value_type>::empty_instance(); 
+		other.m_cb = control_block_type::empty_instance(); 
 	}
 
 	basic_string_cow& operator=(const basic_string_cow& other) {
 		if (this != &other && m_cb!= other.m_cb) {
-			if (m_cb != control_block<value_type>::empty_instance()) {
-				if (--m_cb->reference_count == 0) deallocate_block(m_cb);
+			if (m_cb != control_block_type::empty_instance()) {
+				if (m_cb->dec_ref()) deallocate_block(m_cb);
 			}
 
 			m_cb = other.m_cb;
-			if (m_cb != control_block<value_type>::empty_instance()) {
-				m_cb->reference_count++;
+			if (m_cb != control_block_type::empty_instance()) {
+				m_cb->inc_ref();
 			}
 		}
 		return *this;
@@ -100,8 +132,8 @@ public:
 	}
 
 	~basic_string_cow() {
-		if (m_cb != control_block<value_type>::empty_instance()) {
-			if (--m_cb->reference_count == 0) {
+		if (m_cb != control_block_type::empty_instance()) {
+			if (m_cb->dec_ref()) {
 				deallocate_block(m_cb);
 			}
 		}
@@ -109,7 +141,7 @@ public:
 
 	basic_string_cow(const T* str) {
 		if (str == nullptr || std::strcmp(str, "") == 0) {
-			m_cb = control_block<value_type>::empty_instance();
+			m_cb = control_block_type::empty_instance();
 			return;
 		}
 
@@ -192,7 +224,7 @@ public:
 		return std::basic_string_view<value_type>(m_cb->data(), m_cb->size);
 	}
 
-	friend std::ostream& operator<<(std::ostream& out, const basic_string_cow<value_type> str) {
+	friend std::ostream& operator<<(std::ostream& out, const basic_string_cow<value_type>& str) {
 		return out << str.m_cb->data();
 	}
 	
@@ -221,19 +253,19 @@ public:
 		if (m_cb != control_block<value_type>::empty_instance()) {
 			if (--m_cb->reference_count == 0) deallocate_block(m_cb);
 		}
-		m_cb = control_block<value_type>::empty_instance();
+		m_cb = control_block_type::empty_instance();
 	}
 
 
 	void reserve(size_type newCap) {
-		if (newCap > m_cb->capacity || m_cb->reference_count > 1) 
+		if (newCap > m_cb->capacity || m_cb->is_shared()) 
 			detach(newCap);
 	}
 
 
 	void push_back(value_type chr) {
-		if (m_cb->size >= m_cb->capacity || m_cb->reference_count > 1) {
-			size_type nextCap = m_cb->capacity == 0 ? 4 : m_cb->capacity * 1.5;
+		if (m_cb->size >= m_cb->capacity || m_cb->is_shared()) [[unlikely]] {
+			size_type nextCap = m_cb->capacity == 0 ? 4 : m_cb->capacity + (m_cb->capacity)/2;
 			detach(nextCap);
 		}
 
@@ -244,11 +276,11 @@ public:
 
 
 private:
-	control_block<value_type> *m_cb;
+	control_block_type *m_cb;
 
 private:
 	void detach(size_type m_minCapacity = 0) {
-		if (m_cb->reference_count == 1 && m_cb->capacity >= m_minCapacity) return;
+		if (!m_cb->is_shared() && m_cb->capacity >= m_minCapacity) return;
 
 		size_type new_capacity = std::max(m_minCapacity, static_cast<size_type>(m_cb->size));
 		auto *new_cb = allocate_block(new_capacity);
@@ -256,7 +288,7 @@ private:
 
 		std::memcpy(new_cb->data(), m_cb->data(), (m_cb->size + 1) * sizeof(value_type));
 
-		if (m_cb != control_block<value_type>::empty_instance()) {
+		if (m_cb != control_block_type::empty_instance()) {
 			if (--m_cb->reference_count == 0) deallocate_block(m_cb);
 		}
 
@@ -273,7 +305,7 @@ private:
 
 		std::byte *raw_mem = byte_alloc_traits::allocate(alloc, bytes);
 
-		auto *cb = reinterpret_cast<control_block<value_type>*>(raw_mem);
+		auto *cb = reinterpret_cast<control_block_type*>(raw_mem);
 		cb->capacity = capacity;
 		cb->reference_count = 1;
 		return cb;
@@ -289,6 +321,15 @@ private:
 };
 
 
+using string = basic_string_cow<char, std::allocator<char>, false>;
+using ts_string = basic_string_cow<char, std::allocator<char>, true>;
 
+using wstring = basic_string_cow<wchar_t, std::allocator<wchar_t>, false>;
+using ts_wstring = basic_string_cow<wchar_t, std::allocator<wchar_t>, true>;
 
+using u8string = basic_string_cow<char8_t, std::allocator<char8_t>, false>;
+using ts_u8string = basic_string_cow<char8_t, std::allocator<char8_t>, true>;
+
+using u16string = basic_string_cow<char16_t, std::allocator<char16_t>, false>;
+using ts_u16string = basic_string_cow<char16_t, std::allocator<char16_t>, true>;
 }
