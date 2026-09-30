@@ -50,7 +50,7 @@ struct control_block {
 
 	bool dec_ref() noexcept {
 		if constexpr (threadSafe) {
-			reference_count.fetch_sub(1, std::memory_order_relaxed);
+			return reference_count.fetch_sub(1, std::memory_order_acq_rel) == 1;
 		}
 		else {
 			return --reference_count == 0;
@@ -59,7 +59,7 @@ struct control_block {
 
 	bool is_shared() const noexcept {
 		if constexpr (threadSafe) {
-			return reference_count.load(std::memory_order_acq_rel) == 1;
+			return reference_count.load(std::memory_order_acquire) > 1;
 		}
 		else {
 			return reference_count > 1;
@@ -95,61 +95,91 @@ private:
 	using byte_alloc_traits = std::allocator_traits<byte_alloc_type>;
 
 public:
-	basic_string_cow() {
-		m_cb = control_block_type::empty_instance();
+	basic_string_cow() noexcept {
+		m_sso = {};
+		set_sso_size(0);
 	}
 
-	basic_string_cow(const basic_string_cow& other) 
-	:m_cb(other.m_cb) {
-		if (m_cb != control_block_type::empty_instance()) {
-			m_cb->inc_ref();
+	basic_string_cow(const basic_string_cow& other) {
+		if (other.is_sso()) {
+			std::memcpy(this, &other, sizeof(*this));
+		}
+		else {
+			m_heap = other.m_heap;
+			m_heap.m_cb->inc_ref();
 		}
 	}
 
 	basic_string_cow(basic_string_cow&& other) noexcept
-	: m_cb(other.m_cb)
 	{
-		other.m_cb = control_block_type::empty_instance(); 
+		std::memcpy(this, &other, sizeof(*this)); 
+		other.m_sso = {};
+		other.set_sso_size(0);
 	}
 
 	basic_string_cow& operator=(const basic_string_cow& other) {
-		if (this != &other && m_cb!= other.m_cb) {
-			if (m_cb != control_block_type::empty_instance()) {
-				if (m_cb->dec_ref()) deallocate_block(m_cb);
-			}
+		if (this == &other) return *this;
 
-			m_cb = other.m_cb;
-			if (m_cb != control_block_type::empty_instance()) {
-				m_cb->inc_ref();
+		if (!is_sso()) {
+			if (m_heap.m_cb->dec_ref()) {
+				deallocate_block(m_heap.m_cb);
 			}
 		}
+
+		if (other.is_sso()) {
+			std::memcpy(this, &other, sizeof(*this));
+		}
+		else {
+			m_heap = other.m_heap;
+			m_heap.m_cb->inc_ref();
+		}
+
 		return *this;
 	}
 
 	basic_string_cow& operator=(basic_string_cow&& other) noexcept {
-		std::swap(m_cb, other.m_cb);
+		if (this == &other) return *this;
+
+		if (!is_sso()) {
+			if (m_heap.m_cb->dec_ref()) deallocate_block(m_heap.m_cb);
+		}
+
+		std::memcpy(this, &other, sizeof(*this));
+		other.m_sso = {};
+		other.set_sso_size(0);
+
 		return *this;
 	}
 
 	~basic_string_cow() {
-		if (m_cb != control_block_type::empty_instance()) {
-			if (m_cb->dec_ref()) {
-				deallocate_block(m_cb);
-			}
+		if (!is_sso()) {
+			if (m_heap.m_cb->dec_ref()) deallocate_block(m_heap.m_cb);
 		}
 	}
 
-	basic_string_cow(const T* str) {
-		if (str == nullptr || std::strcmp(str, "") == 0) {
-			m_cb = control_block_type::empty_instance();
+	basic_string_cow(const value_type* str) {
+		if (str == nullptr || str[0] == static_cast<value_type>(0)) {
+			m_sso = {};
+			set_sso_size(0);
 			return;
 		}
 
-		size_type str_size = std::strlen(str);
-		m_cb = allocate_block(str_size);
-		m_cb->size = static_cast<uint32_t>(str_size);
-		std::memcpy(m_cb->data(), str, str_size);
-		m_cb->data()[str_size] = static_cast<value_type>(0);
+		size_type len = std::char_traits<value_type>::length(str);
+		if (len <= SSO_CAP) {
+			set_sso_size(len);
+			std::memcpy(m_sso.data, str, len * sizeof(value_type));
+		}
+		else {
+			set_heap_mode();
+			auto *cblk = allocate_block(len);
+			cblk->size = static_cast<uint32_t>(len);
+			std::memcpy(cblk->data(), str, len * sizeof(value_type));
+			cblk->data()[len] = static_cast<value_type>(0);
+
+			m_heap.m_cb = cblk;
+			m_heap.size = len;
+			m_heap.capacity = len;
+		}
 	}
 
 	// =========== Iterators =========
@@ -274,9 +304,27 @@ public:
 		m_cb->data()[m_cb->size] = static_cast<value_type>(0);
 	}
 
-
 private:
-	control_block_type *m_cb;
+	constexpr static size_type SSO_CAP = 31;
+
+	struct alignas(16) SSO_Layout {
+		value_type data[31];
+		uint8_t tag;
+	};
+	static_assert(sizeof(SSO_Layout) == 32);
+
+	struct Heap_Layout {
+		control_block_type *m_cb;
+		size_type size;
+		size_type capacity;
+		uint64_t flags;
+	};
+	static_assert(sizeof(Heap_Layout) == 32);
+
+	union {
+		SSO_Layout m_sso;
+		Heap_Layout m_heap;
+	};
 
 private:
 	void detach(size_type m_minCapacity = 0) {
@@ -289,7 +337,7 @@ private:
 		std::memcpy(new_cb->data(), m_cb->data(), (m_cb->size + 1) * sizeof(value_type));
 
 		if (m_cb != control_block_type::empty_instance()) {
-			if (--m_cb->reference_count == 0) deallocate_block(m_cb);
+			if (m_cb->dec_ref()) deallocate_block(m_cb);
 		}
 
 		m_cb = new_cb;
@@ -299,7 +347,7 @@ private:
 		return (sizeof(control_block<value_type>) + (capacity + 1) * sizeof(value_type));
 	}
 
-	static control_block<value_type>* allocate_block(size_type capacity) {
+	static control_block_type* allocate_block(size_type capacity) {
 		byte_alloc_type alloc;
 		size_type bytes = cb_size(capacity);
 
@@ -312,12 +360,25 @@ private:
 	}
 
 
-	static void deallocate_block(control_block<value_type>* cb) {
+	static void deallocate_block(control_block_type* cb) {
 		byte_alloc_type alloc;
 		size_type bytes = cb_size(cb->capacity);
 
 		byte_alloc_traits::deallocate(alloc, reinterpret_cast<std::byte *>(cb), bytes);
 	}
+
+	bool is_sso() const noexcept {
+		return (m_sso.tag & 0x80) == 0;
+	}
+
+	void set_sso_size(size_type len) noexcept {
+		m_sso.tag = static_cast<uint8_t>(len);
+		m_sso.data[len] = static_cast<value_type>(0);
+	} 
+
+	void get_sso_size() const noexcept { return m_sso.tag; }
+
+	void set_heap_mode() noexcept { m_sso.tag = 0x80; }
 };
 
 
