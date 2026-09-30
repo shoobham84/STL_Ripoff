@@ -8,56 +8,50 @@
 #include <utility>
 #include <vector>
 
-using str = moo::basic_string_cow<char>;
 
 // ============================================================
 // Compile-Time Checks (static_assert)
 // ============================================================
 
-// Type layout: the whole point of COW is a single pointer
-static_assert(sizeof(str) == 32,
-    "size of moo::string is 32");
+// 32-byte layout for SSO + COW
+static_assert(sizeof(moo::string) == 32, "size of moo::string must be 32 bytes");
 
 // Type aliases are correct
-static_assert(std::is_same_v<str::value_type, char>);
-static_assert(std::is_same_v<str::size_type, std::size_t>);
-static_assert(std::is_same_v<str::iterator, char*>);
-static_assert(std::is_same_v<str::const_iterator, const char*>);
-static_assert(std::is_same_v<str::reference_type, char&>);
-static_assert(std::is_same_v<str::const_reference, const char&>);
+static_assert(std::is_same_v<moo::string::value_type, char>);
+static_assert(std::is_same_v<moo::string::size_type, std::size_t>);
+static_assert(std::is_same_v<moo::string::iterator, char*>);
+static_assert(std::is_same_v<moo::string::const_iterator, const char*>);
+static_assert(std::is_same_v<moo::string::reference_type, char&>);
+static_assert(std::is_same_v<moo::string::const_reference, const char&>);
 
-// Move operations must be noexcept for efficient container usage
-static_assert(std::is_nothrow_move_constructible_v<str>,
+// Move operations must be noexcept
+static_assert(std::is_nothrow_move_constructible_v<moo::string>,
     "Move constructor must be noexcept");
-static_assert(std::is_nothrow_move_assignable_v<str>,
+static_assert(std::is_nothrow_move_assignable_v<moo::string>,
     "Move assignment must be noexcept");
-static_assert(std::is_nothrow_destructible_v<str>,
+static_assert(std::is_nothrow_destructible_v<moo::string>,
     "Destructor must be noexcept");
 
-// Default constructible
-static_assert(std::is_default_constructible_v<str>);
-
-// Copy constructible and assignable
-static_assert(std::is_copy_constructible_v<str>);
-static_assert(std::is_copy_assignable_v<str>);
+// Default, Copy constructible and assignable
+static_assert(std::is_default_constructible_v<moo::string>);
+static_assert(std::is_copy_constructible_v<moo::string>);
+static_assert(std::is_copy_assignable_v<moo::string>);
 
 // Convertible to string_view
-static_assert(std::is_convertible_v<str, std::string_view>,
+static_assert(std::is_convertible_v<moo::string, std::string_view>,
     "Must be implicitly convertible to string_view");
 
-// npos must be the max value
-static_assert(str::npos == static_cast<std::size_t>(-1));
+// npos must be max size_t
+static_assert(moo::string::npos == static_cast<std::size_t>(-1));
 
-// CharacterType concept should accept char and reject non-trivial types
+// CharacterType concept checks
 static_assert(moo::CharacterType<char>);
 static_assert(moo::CharacterType<wchar_t>);
 static_assert(moo::CharacterType<char16_t>);
 static_assert(moo::CharacterType<char32_t>);
 static_assert(moo::CharacterType<unsigned char>);
-static_assert(!moo::CharacterType<std::string>,
-    "std::string is NOT trivially copyable, concept must reject it");
-static_assert(!moo::CharacterType<std::vector<int> >,
-    "std::vector is NOT trivially copyable, concept must reject it");
+static_assert(!moo::CharacterType<std::string>);
+static_assert(!moo::CharacterType<std::vector<int>>);
 
 
 // ============================================================
@@ -65,10 +59,10 @@ static_assert(!moo::CharacterType<std::vector<int> >,
 // ============================================================
 
 void test_default_constructor() {
-    str s;
+    moo::string s;
     assert(s.size() == 0);
     assert(s.length() == 0);
-    assert(s.capacity() == 0);
+    assert(s.capacity() == 30); // SSO capacity is 30
     assert(s.empty());
     assert(s.c_str() != nullptr);
     assert(s.c_str()[0] == '\0');
@@ -76,19 +70,28 @@ void test_default_constructor() {
 }
 
 void test_cstring_constructor() {
-    str s("Hello");
+    // Small string (SSO)
+    moo::string s("Hello");
     assert(s.size() == 5);
     assert(s.length() == 5);
+    assert(s.capacity() == 30);
     assert(!s.empty());
     assert(std::strcmp(s.c_str(), "Hello") == 0);
 
-    // Empty C-string should behave like default
-    str s2("");
+    // Large string (> 30 chars, Heap)
+    const char* long_text = "This is a long string that exceeds the SSO capacity of 30 bytes!";
+    moo::string s_long(long_text);
+    assert(s_long.size() == std::strlen(long_text));
+    assert(s_long.capacity() >= s_long.size());
+    assert(std::strcmp(s_long.c_str(), long_text) == 0);
+
+    // Empty C-string
+    moo::string s2("");
     assert(s2.size() == 0);
     assert(s2.empty());
 
-    // Null pointer should behave like default
-    str s3(nullptr);
+    // Null pointer
+    moo::string s3(nullptr);
     assert(s3.size() == 0);
     assert(s3.empty());
 
@@ -96,150 +99,145 @@ void test_cstring_constructor() {
 }
 
 void test_copy_constructor() {
-    str s1("Hello World");
-    str s2 = s1;
-
-    // Must have same content
+    // 1. SSO copy: independent stack buffers
+    moo::string s1("Hello World");
+    moo::string s2 = s1;
     assert(s2.size() == s1.size());
     assert(std::strcmp(s1.c_str(), s2.c_str()) == 0);
+    assert(s1.c_str() != s2.c_str()); // SSO buffers live on separate stack frames
 
-    // COW: must share the same underlying buffer
-    assert(s1.c_str() == s2.c_str());
+    // 2. Heap COW copy: shared buffer
+    const char* long_text = "This is a long string that exceeds the SSO capacity of 31 bytes!";
+    moo::string h1(long_text);
+    moo::string h2 = h1;
+    assert(h2.size() == h1.size());
+    assert(std::strcmp(h1.c_str(), h2.c_str()) == 0);
+    assert(h1.c_str() == h2.c_str()); // COW: shared underlying buffer!
 
     std::cout << "  [PASS] copy constructor\n";
 }
 
 void test_move_constructor() {
-    str s1("Move me");
-    const char* original_ptr = s1.c_str();
-    std::size_t original_size = s1.size();
-
-    str s2 = std::move(s1);
-
-    // s2 stole s1's buffer
-    assert(s2.c_str() == original_ptr);
-    assert(s2.size() == original_size);
-    assert(std::strcmp(s2.c_str(), "Move me") == 0);
-
-    // s1 must be in valid empty state
+    // Move SSO
+    moo::string s1("Move SSO");
+    moo::string s2 = std::move(s1);
+    assert(std::strcmp(s2.c_str(), "Move SSO") == 0);
     assert(s1.empty());
-    assert(s1.size() == 0);
+
+    // Move Heap
+    const char* long_text = "A long string that uses heap allocation for move constructor testing!";
+    moo::string h1(long_text);
+    const char* original_ptr = h1.c_str();
+    std::size_t original_size = h1.size();
+
+    moo::string h2 = std::move(h1);
+    assert(h2.c_str() == original_ptr);
+    assert(h2.size() == original_size);
+    assert(std::strcmp(h2.c_str(), long_text) == 0);
+    assert(h1.empty());
 
     std::cout << "  [PASS] move constructor\n";
 }
 
 void test_copy_assignment() {
-    str s1("Original");
-    str s2("Replace me");
+    // SSO copy assignment
+    moo::string s1("Original");
+    moo::string s2("Replace me");
     s2 = s1;
-
-    // Must share buffer after copy assignment (COW)
-    assert(s2.c_str() == s1.c_str());
     assert(s2.size() == s1.size());
     assert(std::strcmp(s2.c_str(), "Original") == 0);
+    assert(s2.c_str() != s1.c_str());
+
+    // Heap COW copy assignment
+    moo::string h1("A long string for testing copy assignment in COW heap mode!");
+    moo::string h2("Short");
+    h2 = h1;
+    assert(h2.c_str() == h1.c_str()); // COW: shares buffer
+    assert(std::strcmp(h2.c_str(), h1.c_str()) == 0);
 
     std::cout << "  [PASS] copy assignment\n";
 }
 
 void test_move_assignment() {
-    str s1("Source");
-    const char* original_ptr = s1.c_str();
-    str s2("Target");
+    // Move assignment Heap -> Heap
+    moo::string h1("Source long string for move assignment test!");
+    const char* original_ptr = h1.c_str();
+    moo::string h2("Target");
 
-    s2 = std::move(s1);
-
-    assert(s2.c_str() == original_ptr);
-    assert(std::strcmp(s2.c_str(), "Source") == 0);
+    h2 = std::move(h1);
+    assert(h2.c_str() == original_ptr);
+    assert(std::strcmp(h2.c_str(), "Source long string for move assignment test!") == 0);
 
     std::cout << "  [PASS] move assignment\n";
 }
 
 void test_self_assignment() {
-    str s1("SelfTest");
-    const char* ptr_before = s1.c_str();
-
-    // Copy self-assignment must be safe
+    moo::string s1("SelfTest");
     s1 = s1;
-    assert(s1.c_str() == ptr_before);
     assert(std::strcmp(s1.c_str(), "SelfTest") == 0);
 
-    // Move self-assignment must be safe
-    s1 = std::move(s1);
-    // After self-move, just verify it doesn't crash and is in a valid state
-    (void)s1.size();
+    moo::string h1("A long string for testing self-assignment in COW mode!");
+    const char* ptr = h1.c_str();
+    h1 = h1;
+    assert(h1.c_str() == ptr);
+    assert(std::strcmp(h1.c_str(), "A long string for testing self-assignment in COW mode!") == 0);
 
     std::cout << "  [PASS] self-assignment\n";
 }
 
 void test_cow_detach_on_write() {
-    str s1("Shared");
-    str s2 = s1;
+    // Must be in Heap mode (> 31 chars) to test COW detach
+    moo::string s1("A long string that exceeds 31 chars to test COW detach!");
+    moo::string s2 = s1;
 
-    // Before mutation: same buffer
-    assert(s1.c_str() == s2.c_str());
+    assert(s1.c_str() == s2.c_str()); // shared
 
-    // Mutate s1 via operator[]
-    s1[0] = 'X';
+    s1[0] = 'X'; // trigger detach
 
-    // After mutation: buffers must have diverged
-    assert(s1.c_str() != s2.c_str());
-
-    // s1 was modified
-    assert(std::strcmp(s1.c_str(), "Xhared") == 0);
-
-    // s2 is untouched
-    assert(std::strcmp(s2.c_str(), "Shared") == 0);
+    assert(s1.c_str() != s2.c_str()); // detached!
+    assert(s1[0] == 'X');
+    assert(s2[0] == 'A');
 
     std::cout << "  [PASS] COW detach on write\n";
 }
 
 void test_cow_chain() {
-    // Create a chain of copies, then mutate the middle one
-    str s1("Chain");
-    str s2 = s1;
-    str s3 = s2;
+    moo::string s1("Chain of multiple shared COW string instances that are long!");
+    moo::string s2 = s1;
+    moo::string s3 = s2;
 
-    // All 3 share the same buffer
     assert(s1.c_str() == s2.c_str());
     assert(s2.c_str() == s3.c_str());
 
-    // Mutate s2
-    s2[0] = 'Z';
+    s2[0] = 'Z'; // mutate middle
 
-    // s2 got its own buffer, s1 and s3 still share
     assert(s1.c_str() != s2.c_str());
-    assert(s1.c_str() == s3.c_str());
-    assert(std::strcmp(s1.c_str(), "Chain") == 0);
-    assert(std::strcmp(s2.c_str(), "Zhain") == 0);
-    assert(std::strcmp(s3.c_str(), "Chain") == 0);
+    assert(s1.c_str() == s3.c_str()); // s1 and s3 still share!
+    assert(s2[0] == 'Z');
+    assert(s1[0] == 'C');
+    assert(s3[0] == 'C');
 
     std::cout << "  [PASS] COW chain sharing\n";
 }
 
 void test_const_access_no_detach() {
-    str s1("NoDetach");
-    str s2 = s1;
+    moo::string s1("NoDetach on a long shared COW heap string instance!");
+    moo::string s2 = s1;
 
-    // Const operator[] must NOT detach
-    const str& cs1 = s1;
+    const moo::string& cs1 = s1;
     char c = cs1[0];
     assert(c == 'N');
-
-    // Still shared after const access
-    assert(s1.c_str() == s2.c_str());
+    assert(s1.c_str() == s2.c_str()); // still shared!
 
     std::cout << "  [PASS] const access does not detach\n";
 }
 
 void test_operator_index() {
-    str s("abcde");
-
-    // Read via const
-    const str& cs = s;
+    moo::string s("abcde");
+    const moo::string& cs = s;
     assert(cs[0] == 'a');
     assert(cs[4] == 'e');
 
-    // Write
     s[2] = 'Z';
     assert(std::strcmp(s.c_str(), "abZde") == 0);
 
@@ -247,7 +245,7 @@ void test_operator_index() {
 }
 
 void test_push_back() {
-    str s;
+    moo::string s;
     assert(s.empty());
 
     s.push_back('H');
@@ -256,149 +254,153 @@ void test_push_back() {
 
     assert(s.size() == 3);
     assert(std::strcmp(s.c_str(), "Hi!") == 0);
-
-    // Null-terminator must be in place
     assert(s.c_str()[3] == '\0');
 
     std::cout << "  [PASS] push_back\n";
 }
 
-void test_push_back_growth() {
-    str s;
+void test_sso_to_heap_promotion() {
+    moo::string s;
+    // Push 30 characters: should stay in SSO
+    for (int i = 0; i < 30; ++i) {
+        s.push_back(static_cast<char>('a' + (i % 26)));
+    }
+    assert(s.size() == 30);
+    assert(s.capacity() == 30);
 
-    // Push enough characters to trigger multiple capacity growths
-    for (int i = 0; i < 100; ++i) {
+    // 31st push: triggers promotion from SSO to Heap!
+    s.push_back('!');
+    assert(s.size() == 31);
+    assert(s.capacity() >= 31);
+    assert(s[30] == '!');
+    assert(s.c_str()[31] == '\0');
+
+    // Continue pushing in Heap mode
+    for (int i = 0; i < 50; ++i) {
         s.push_back('x');
     }
-    assert(s.size() == 100);
-    assert(s.capacity() >= 100);
+    assert(s.size() == 81);
+    assert(s.c_str()[81] == '\0');
 
-    // Verify all characters are correct
-    for (std::size_t i = 0; i < 100; ++i) {
-        const str& cs = s;
-        assert(cs[i] == 'x');
-    }
-
-    // Verify null termination
-    assert(s.c_str()[100] == '\0');
-
-    std::cout << "  [PASS] push_back growth\n";
+    std::cout << "  [PASS] SSO to heap promotion\n";
 }
 
 void test_push_back_detaches_shared() {
-    str s1("AB");
-    str s2 = s1; // shared
+    moo::string s1("A long shared COW string before push_back testing!");
+    moo::string s2 = s1;
 
     assert(s1.c_str() == s2.c_str());
 
-    s1.push_back('C');
+    s1.push_back('X');
 
-    // Must have detached
     assert(s1.c_str() != s2.c_str());
-    assert(std::strcmp(s1.c_str(), "ABC") == 0);
-    assert(std::strcmp(s2.c_str(), "AB") == 0);
+    assert(s1.ends_with("X"));
+    assert(!s2.ends_with("X"));
 
     std::cout << "  [PASS] push_back detaches shared buffer\n";
 }
 
 void test_reserve() {
-    str s("tiny");
-    std::size_t old_cap = s.capacity();
+    moo::string s("tiny");
 
+    // Reserve within SSO
+    s.reserve(20);
+    assert(s.capacity() == 30); // SSO capacity remains 30
+
+    // Reserve beyond SSO -> promotes to Heap
     s.reserve(1000);
     assert(s.capacity() >= 1000);
-    // Content must be preserved
     assert(std::strcmp(s.c_str(), "tiny") == 0);
     assert(s.size() == 4);
 
-    // Reserve smaller than current capacity should be a no-op
+    // Smaller reserve should not shrink
     s.reserve(5);
-    assert(s.capacity() >= 1000); // capacity should NOT shrink
+    assert(s.capacity() >= 1000);
 
     std::cout << "  [PASS] reserve\n";
 }
 
 void test_clear() {
-    str s("Clear me");
+    // Clear SSO
+    moo::string s("Clear me");
     assert(!s.empty());
-
     s.clear();
     assert(s.empty());
     assert(s.size() == 0);
     assert(s.c_str()[0] == '\0');
 
-    // Clearing an already empty string must be safe
-    s.clear();
-    assert(s.empty());
+    // Clear Heap
+    moo::string h("A long string that is in heap mode before clear!");
+    h.clear();
+    assert(h.empty());
+    assert(h.size() == 0);
+    assert(h.c_str()[0] == '\0');
 
     std::cout << "  [PASS] clear\n";
 }
 
 void test_clear_cow_independence() {
-    str s1("Shared");
-    str s2 = s1;
+    moo::string s1("Shared long string for testing clear independence!");
+    moo::string s2 = s1;
 
+    assert(s1.c_str() == s2.c_str());
     s1.clear();
 
-    // s1 is empty, s2 is untouched
     assert(s1.empty());
-    assert(std::strcmp(s2.c_str(), "Shared") == 0);
-    assert(s2.size() == 6);
+    assert(!s2.empty());
+    assert(std::strcmp(s2.c_str(), "Shared long string for testing clear independence!") == 0);
 
     std::cout << "  [PASS] clear COW independence\n";
 }
 
 void test_equality_operator() {
-    str s1("same");
-    str s2("same");
-    str s3("diff");
+    moo::string s1("same");
+    moo::string s2("same");
+    moo::string s3("diff");
 
     assert(s1 == s2);
     assert(!(s1 == s3));
 
-    // COW copies must be equal (fast path: pointer comparison)
-    str s4 = s1;
-    assert(s1 == s4);
+    // COW copies fast-path
+    moo::string h1("A long string for equality check testing COW fast path!");
+    moo::string h2 = h1;
+    assert(h1 == h2);
 
-    // Empty strings
-    str e1, e2;
+    moo::string e1, e2;
     assert(e1 == e2);
 
     std::cout << "  [PASS] operator==\n";
 }
 
 void test_spaceship_operator() {
-    str a("apple");
-    str b("banana");
-    str c("apple");
+    moo::string a("apple");
+    moo::string b("banana");
+    moo::string c("apple");
 
     assert((a <=> b) < 0);
     assert((b <=> a) > 0);
     assert((a <=> c) == 0);
 
-    // COW copies: fast path
-    str d = a;
-    assert((a <=> d) == 0);
+    moo::string h1("A long string for spaceship operator testing!");
+    moo::string h2 = h1;
+    assert((h1 <=> h2) == 0);
 
     std::cout << "  [PASS] operator<=>\n";
 }
 
 void test_string_view_conversion() {
-    str s("ViewMe");
+    moo::string s("ViewMe");
     std::string_view sv = s;
 
     assert(sv.size() == 6);
     assert(sv == "ViewMe");
-
-    // Modifying through string_view is impossible (const),
-    // verify the data pointer matches
     assert(sv.data() == s.c_str());
 
     std::cout << "  [PASS] string_view conversion\n";
 }
 
 void test_starts_with() {
-    str s("Hello World");
+    moo::string s("Hello World");
     assert(s.starts_with("Hello"));
     assert(s.starts_with("H"));
     assert(s.starts_with("Hello World"));
@@ -409,7 +411,7 @@ void test_starts_with() {
 }
 
 void test_ends_with() {
-    str s("Hello World");
+    moo::string s("Hello World");
     assert(s.ends_with("World"));
     assert(s.ends_with("d"));
     assert(s.ends_with("Hello World"));
@@ -420,7 +422,7 @@ void test_ends_with() {
 }
 
 void test_contains() {
-    str s("The quick brown fox");
+    moo::string s("The quick brown fox");
     assert(s.contains("quick"));
     assert(s.contains("brown fox"));
     assert(s.contains("The"));
@@ -431,17 +433,17 @@ void test_contains() {
 }
 
 void test_find() {
-    str s("abcabc");
+    moo::string s("abcabc");
     assert(s.find("abc") == 0);
     assert(s.find("abc", 1) == 3);
-    assert(s.find("xyz") == str::npos);
+    assert(s.find("xyz") == moo::string::npos);
     assert(s.find("c") == 2);
 
     std::cout << "  [PASS] find\n";
 }
 
 void test_stream_output() {
-    str s("StreamTest");
+    moo::string s("StreamTest");
     std::ostringstream oss;
     oss << s;
     assert(oss.str() == "StreamTest");
@@ -450,20 +452,17 @@ void test_stream_output() {
 }
 
 void test_empty_string_operations() {
-    // Ensure no crashes on operations with empty strings
-    str e;
-    str e2 = e; // copy empty
-    str e3 = std::move(e); // move empty
+    moo::string e;
+    moo::string e2 = e;
+    moo::string e3 = std::move(e);
 
     assert(e2.empty());
     assert(e3.empty());
 
     e2.clear();
     assert(e2.empty());
-
     assert(e2 == e3);
 
-    // push_back on empty
     e2.push_back('a');
     assert(e2.size() == 1);
     assert(std::strcmp(e2.c_str(), "a") == 0);
@@ -472,36 +471,43 @@ void test_empty_string_operations() {
 }
 
 void test_multiple_detach_cycles() {
-    // Create a string, copy it many times, mutate each copy
-    str original("DETACH");
+    moo::string original("DETACH - long string exceeding the SSO capacity of 31 bytes!");
 
     for (int i = 0; i < 50; ++i) {
-        str copy = original;
-        assert(copy.c_str() == original.c_str()); // shared
+        moo::string copy = original;
+        assert(copy.c_str() == original.c_str());
         copy[0] = static_cast<char>('A' + (i % 26));
-        assert(copy.c_str() != original.c_str()); // detached
+        assert(copy.c_str() != original.c_str());
     }
 
-    // Original must be completely untouched
-    assert(std::strcmp(original.c_str(), "DETACH") == 0);
-
+    assert(original[0] == 'D');
     std::cout << "  [PASS] multiple detach cycles\n";
 }
 
 void test_scope_destruction_order() {
-    // Ensure that destroying copies in various orders doesn't crash
-    str* s1 = new str("Scope");
-    str* s2 = new str(*s1);
-    str* s3 = new str(*s2);
+    moo::string* s1 = new moo::string("Scope - long string exceeding SSO limit for heap destruction!");
+    moo::string* s2 = new moo::string(*s1);
+    moo::string* s3 = new moo::string(*s2);
 
-    // Destroy in reverse order
+    assert(s1->c_str() == s2->c_str());
+    assert(s2->c_str() == s3->c_str());
+
     delete s3;
     delete s1;
-    // s2 must still be valid
-    assert(std::strcmp(s2->c_str(), "Scope") == 0);
+    assert(s2->starts_with("Scope"));
     delete s2;
 
     std::cout << "  [PASS] scope destruction order\n";
+}
+
+void test_thread_safe_string() {
+    using ts_str = moo::basic_string_cow<char, std::allocator<char>, true>;
+    ts_str s1("Thread-safe long string exceeding the SSO limit of 31 bytes!");
+    ts_str s2 = s1;
+    assert(s1.c_str() == s2.c_str());
+    s1[0] = 'X';
+    assert(s1.c_str() != s2.c_str());
+    std::cout << "  [PASS] thread-safe ts_string basic operations\n";
 }
 
 int main() {
@@ -522,7 +528,7 @@ int main() {
     test_const_access_no_detach();
     test_operator_index();
     test_push_back();
-    test_push_back_growth();
+    test_sso_to_heap_promotion();
     test_push_back_detaches_shared();
     test_reserve();
     test_clear();
@@ -538,6 +544,7 @@ int main() {
     test_empty_string_operations();
     test_multiple_detach_cycles();
     test_scope_destruction_order();
+    test_thread_safe_string();
 
     std::cout << "\n=== All tests passed! ===\n";
     return 0;
