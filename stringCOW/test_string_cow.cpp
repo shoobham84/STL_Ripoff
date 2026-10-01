@@ -500,6 +500,69 @@ void test_scope_destruction_order() {
     std::cout << "  [PASS] scope destruction order\n";
 }
 
+void test_fill_constructor() {
+    // SSO fill (<= 30)
+    moo::string s1(10, 'a');
+    assert(s1.size() == 10);
+    assert(s1 == "aaaaaaaaaa");
+
+    // Heap fill (> 30)
+    moo::string s2(50, 'b');
+    assert(s2.size() == 50);
+    assert(s2.capacity() >= 50);
+    assert(s2.starts_with("bbbbb"));
+
+    std::cout << "  [PASS] fill constructor\n";
+}
+
+void test_sized_constructor() {
+    moo::string s("HelloWorld", 5);
+    assert(s.size() == 5);
+    assert(s == "Hello");
+
+    std::cout << "  [PASS] sized pointer constructor\n";
+}
+
+void test_append_and_concat() {
+    // 1. SSO append (stays in SSO)
+    moo::string s("Hello");
+    s.append(" World");
+    assert(s == "Hello World");
+
+    // 2. operator+= (char)
+    s += '!';
+    assert(s == "Hello World!");
+
+    // 3. SSO -> Heap promotion via append
+    s += " - this will force promotion to heap mode because length exceeds 30!";
+    assert(s.size() > 30);
+    assert(s.starts_with("Hello World!"));
+
+    // 4. Self-append test (s.append(s))
+    moo::string self("Repeat ");
+    self.append(self);
+    assert(self == "Repeat Repeat ");
+
+    std::cout << "  [PASS] append and operator+=\n";
+}
+
+void test_pop_back() {
+    // SSO pop_back
+    moo::string s1("abc");
+    s1.pop_back();
+    assert(s1 == "ab");
+    assert(s1.size() == 2);
+
+    // Heap pop_back
+    moo::string s2("A long string exceeding thirty characters to test pop_back!");
+    std::size_t old_len = s2.size();
+    s2.pop_back();
+    assert(s2.size() == old_len - 1);
+    assert(!s2.ends_with("!"));
+
+    std::cout << "  [PASS] pop_back\n";
+}
+
 void test_thread_safe_string() {
     using ts_str = moo::basic_string_cow<char, std::allocator<char>, true>;
     ts_str s1("Thread-safe long string exceeding the SSO limit of 31 bytes!");
@@ -518,6 +581,8 @@ int main() {
     std::cout << "[Runtime tests]\n";
     test_default_constructor();
     test_cstring_constructor();
+    test_fill_constructor();
+    test_sized_constructor();
     test_copy_constructor();
     test_move_constructor();
     test_copy_assignment();
@@ -528,6 +593,8 @@ int main() {
     test_const_access_no_detach();
     test_operator_index();
     test_push_back();
+    test_pop_back();
+    test_append_and_concat();
     test_sso_to_heap_promotion();
     test_push_back_detaches_shared();
     test_reserve();

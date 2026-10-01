@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <iterator>
 #include <atomic>
+#include <cassert>
 
 namespace moo 
 {
@@ -22,24 +23,16 @@ struct control_block {
 	uint32_t capacity;
 	ref_type reference_count;
 
-	charType *data() {
+	constexpr charType *data() {
 		return reinterpret_cast<charType *>(this + 1);
 	}
 
-	const charType *data() const {
+	constexpr const charType *data() const {
 		return reinterpret_cast<const charType*>(this + 1);
 	}
 
-	static control_block *empty_instance() {
-		static struct {
-			control_block cb { 0, 0, 0};
-			charType null_term = 0;
-		} empty_block;
-		return &empty_block.cb;
-	}
 
-
-	void inc_ref() noexcept {
+	constexpr void inc_ref() noexcept {
 		if constexpr (threadSafe) {
 			reference_count.fetch_add(1, std::memory_order_relaxed);
 		}
@@ -48,7 +41,7 @@ struct control_block {
 		}
 	}
 
-	bool dec_ref() noexcept {
+	constexpr bool dec_ref() noexcept {
 		if constexpr (threadSafe) {
 			return reference_count.fetch_sub(1, std::memory_order_acq_rel) == 1;
 		}
@@ -57,7 +50,7 @@ struct control_block {
 		}
 	}
 
-	bool is_shared() const noexcept {
+	constexpr bool is_shared() const noexcept {
 		if constexpr (threadSafe) {
 			return reference_count.load(std::memory_order_acquire) > 1;
 		}
@@ -137,7 +130,7 @@ public:
 		return *this;
 	}
 
-	basic_string_cow& operator=(basic_string_cow&& other) noexcept {
+	constexpr basic_string_cow& operator=(basic_string_cow&& other) noexcept {
 		if (this == &other) return *this;
 
 		if (!is_sso()) {
@@ -149,12 +142,6 @@ public:
 		other.set_sso_size(0);
 
 		return *this;
-	}
-
-	~basic_string_cow() {
-		if (!is_sso()) {
-			if (m_heap.m_cb->dec_ref()) deallocate_block(m_heap.m_cb);
-		}
 	}
 
 	basic_string_cow(const value_type* str) {
@@ -179,6 +166,48 @@ public:
 			m_heap.m_cb = cblk;
 			m_heap.size = len;
 			m_heap.capacity = len;
+		}
+	}
+
+	basic_string_cow(size_type count, value_type chr) {
+		if (count <= SSO_CAP) {
+			std::memset(m_sso.data, chr, count);
+			set_sso_size(count);
+		}
+		else {
+			set_heap_mode();
+			auto *cblk = allocate_block(count);
+			cblk->size = static_cast<uint32_t>(count);
+			std::memset(cblk->data(), chr, count);
+			cblk->data()[count] = static_cast<value_type>(0);
+
+			m_heap.m_cb = cblk;
+			m_heap.size = count;
+			m_heap.capacity = count;
+		}
+	}
+
+	basic_string_cow(const value_type *str, size_type count) {
+		if (count <= SSO_CAP) {
+			std::memcpy(m_sso.data, str, count);
+			set_sso_size(count);
+		}
+		else {
+			set_heap_mode();
+			auto *cblk = allocate_block(count);
+			cblk->size = static_cast<uint32_t>(count);
+			std::memcpy(cblk->data(), str, count);
+			cblk->data()[count] = static_cast<value_type>(0);
+
+			m_heap.m_cb = cblk;
+			m_heap.size = count;
+			m_heap.capacity = count;
+		}
+	}
+
+	~basic_string_cow() {
+		if (!is_sso()) {
+			if (m_heap.m_cb->dec_ref()) deallocate_block(m_heap.m_cb);
 		}
 	}
 
@@ -209,23 +238,23 @@ public:
 		return data() + size();
 	}
 
-	view_type view() const noexcept {
+	constexpr view_type view() const noexcept {
 		return static_cast<view_type>(*this);
 	}
 
-	bool starts_with(view_type pref) const noexcept {
+	constexpr bool starts_with(view_type pref) const noexcept {
 		return view().starts_with(pref);
 	}
 
-	bool ends_with(view_type suff) const noexcept {
+	constexpr bool ends_with(view_type suff) const noexcept {
 		return view().ends_with(suff);
 	}
 
-	bool contains(view_type sv) const noexcept {
+	constexpr bool contains(view_type sv) const noexcept {
 		return view().find(sv) != view_type::npos;
 	}
 
-	size_type find(view_type sv, size_type pos = 0) const noexcept {
+	constexpr size_type find(view_type sv, size_type pos = 0) const noexcept {
 		return view().find(sv, pos);
 	}
 
@@ -257,29 +286,38 @@ public:
 	friend std::ostream& operator<<(std::ostream& out, const basic_string_cow& str) {
 		return out.write(str.data(), str.size());
 	}
+
+	constexpr basic_string_cow& operator+=(value_type ch) {
+		push_back(ch);
+		return *this;
+	}
+
+	constexpr basic_string_cow& operator+=(view_type sv) {
+		return append(sv);
+	}
 	
 	// ========== Methods ==========
-	[[nodiscard]] const value_type* data() const noexcept {
+	[[nodiscard]] constexpr const value_type* data() const noexcept {
 		return is_sso() ? m_sso.data : m_heap.m_cb->data();
 	}
 
-	[[nodiscard]] value_type* data() noexcept {
+	[[nodiscard]] constexpr value_type* data() noexcept {
 		return is_sso() ? m_sso.data : m_heap.m_cb->data();
 	}
 
-	[[nodiscard]] const value_type* c_str() const noexcept {
+	[[nodiscard]] constexpr const value_type* c_str() const noexcept {
 		return data();
 	}
 
-	[[nodiscard]] size_type size() const noexcept {
+	[[nodiscard]] constexpr size_type size() const noexcept {
 		return is_sso() ? get_sso_size() : m_heap.size;
 	}
 
-	[[nodiscard]] size_type capacity() const noexcept {
+	[[nodiscard]] constexpr size_type capacity() const noexcept {
 		return is_sso() ? SSO_CAP : m_heap.capacity;
 	}
 
-	[[nodiscard]] bool empty() const noexcept {
+	[[nodiscard]] constexpr bool empty() const noexcept {
 		return size() == 0;
 	}
 
@@ -287,7 +325,7 @@ public:
 		return size();
 	}
 
-	void clear() noexcept {
+	constexpr void clear() noexcept {
 		if (!is_sso()) {
 			if (m_heap.m_cb->dec_ref()) deallocate_block(m_heap.m_cb);
 		}
@@ -295,16 +333,19 @@ public:
 		set_sso_size(0);
 	}
 
-	void reserve(size_type newCap) {
+	constexpr void reserve(size_type newCap) {
 		if (newCap <= SSO_CAP) return;
 
 		if (is_sso()) {
-			set_heap_mode();
 			size_type len = get_sso_size();
+			value_type tmp[SSO_CAP + 1];
+			std::memcpy(tmp, m_sso.data, (len+1) * sizeof(value_type));
+
 			auto *cblk = allocate_block(newCap);
 			cblk->size = static_cast<uint32_t>(len);
-			std::memcpy(cblk->data(), m_sso.data, (len + 1) * sizeof(value_type));
+			std::memcpy(cblk->data(), tmp, (len + 1) * sizeof(value_type));
 
+			set_heap_mode();
 			m_heap.m_cb = cblk;
 			m_heap.size = len;
 			m_heap.capacity = newCap;
@@ -315,7 +356,7 @@ public:
 		}
 	}
 
-	void push_back(value_type chr) {
+	constexpr void push_back(value_type chr) {
 		size_type len = size();
 
 		if (is_sso()) {
@@ -325,7 +366,6 @@ public:
 				return;
 			}
 
-			set_heap_mode();
 			value_type tmp[SSO_CAP + 1];
 			std::memcpy(tmp, m_sso.data, (len + 1) * sizeof(value_type));
 
@@ -336,6 +376,7 @@ public:
 			cblk->data()[len] = chr;
 			cblk->data()[len + 1] = static_cast<value_type>(0);
 
+			set_heap_mode();
 			m_heap.m_cb = cblk;
 			m_heap.size = len + 1;
 			m_heap.capacity = newCap;
@@ -354,8 +395,47 @@ public:
 		}
 	}
 
+	constexpr void pop_back() noexcept {
+		assert(!empty());
+		if (is_sso()) 
+			set_sso_size(get_sso_size() - 1);
+		else {
+			detach();
+			m_heap.size--;
+			m_heap.m_cb->size--;
+			m_heap.m_cb->data()[m_heap.size] = static_cast<value_type>(0);
+		}
+	}
+
+	constexpr basic_string_cow& append(view_type sv) {
+		if (sv.empty()) return *this;
+
+		const size_type new_len = size() + sv.size();
+
+		const bool is_self = (sv.data() >= data() && sv.data() < data() + size());
+		const size_type self_offset = is_self ? static_cast<size_type>(sv.data() - data()) : 0;
+
+		reserve(new_len);
+
+		const value_type *src = is_self ? (data() + self_offset) : sv.data();
+
+		if (is_sso()) {
+			std::memcpy(m_sso.data + size(), src, sv.size() * sizeof(value_type));
+			set_sso_size(new_len);
+		}
+		else {
+			std::memcpy(m_heap.m_cb->data() + size(), src, sv.size() * sizeof(value_type));
+        	m_heap.size = new_len;
+        	m_heap.m_cb->size = static_cast<uint32_t>(new_len);
+			m_heap.m_cb->data()[new_len] = static_cast<value_type>(0);
+        }
+		
+		return *this;
+	}
+
+
 private:
-	constexpr static size_type SSO_CAP = 31;
+	constexpr static size_type SSO_CAP = 30;
 
 	struct alignas(16) SSO_Layout {
 		value_type data[31];
@@ -418,18 +498,18 @@ private:
 		byte_alloc_traits::deallocate(alloc, reinterpret_cast<std::byte *>(cb), bytes);
 	}
 
-	bool is_sso() const noexcept {
+	constexpr bool is_sso() const noexcept {
 		return (m_sso.tag & 0x80) == 0;
 	}
 
-	void set_sso_size(size_type len) noexcept {
+	constexpr void set_sso_size(size_type len) noexcept {
 		m_sso.tag = static_cast<uint8_t>(len);
 		m_sso.data[len] = static_cast<value_type>(0);
 	} 
 
-	size_type get_sso_size() const noexcept { return m_sso.tag; }
+	constexpr size_type get_sso_size() const noexcept { return m_sso.tag; }
 
-	void set_heap_mode() noexcept { m_sso.tag = 0x80; }
+	constexpr void set_heap_mode() noexcept { m_sso.tag = 0x80; }
 };
 
 
