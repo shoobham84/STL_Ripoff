@@ -573,6 +573,93 @@ void test_thread_safe_string() {
     std::cout << "  [PASS] thread-safe ts_string basic operations\n";
 }
 
+void test_unshareable_escaping_reference() {
+    // The classic escaping-reference bug: obtain a reference, then copy.
+    // Without the unshareable flag, writing through the reference would corrupt the copy.
+    moo::string s1("A long string that exceeds SSO to test unshareable state!");
+    char& ref = s1[0]; // triggers detach + mark_unshareable
+
+    // Copy from an unshareable source must deep-copy, NOT share
+    moo::string s2 = s1;
+    assert(s1.c_str() != s2.c_str()); // must be separate buffers
+
+    // Writing through the escaped reference must NOT corrupt s2
+    ref = 'Z';
+    assert(s1[0] == 'Z');
+    assert(s2[0] == 'A'); // s2 is independent!
+
+    std::cout << "  [PASS] unshareable escaping reference\n";
+}
+
+void test_unshareable_via_data() {
+    moo::string s1("Long string for testing non-const data() unshareable!");
+    char* ptr = s1.data(); // triggers detach + mark_unshareable
+
+    moo::string s2 = s1;
+    assert(s1.c_str() != s2.c_str()); // deep-copied, not shared
+
+    ptr[0] = 'X';
+    assert(s1[0] == 'X');
+    assert(s2[0] == 'L'); // s2 unaffected
+
+    std::cout << "  [PASS] unshareable via non-const data()\n";
+}
+
+void test_unshareable_via_begin() {
+    moo::string s1("Long string for testing non-const begin() unshareable!");
+    auto it = s1.begin(); // triggers detach + mark_unshareable
+
+    moo::string s2 = s1;
+    assert(s1.c_str() != s2.c_str()); // deep-copied, not shared
+
+    *it = 'X';
+    assert(s1[0] == 'X');
+    assert(s2[0] == 'L'); // s2 unaffected
+
+    std::cout << "  [PASS] unshareable via non-const begin()\n";
+}
+
+void test_unshareable_copy_assignment() {
+    moo::string s1("Long string for testing copy assignment unshareable path!");
+    static_cast<void>(s1[0]); // mark s1's block as unshareable
+
+    moo::string s2("Another long string that is also beyond the SSO limit!");
+    s2 = s1; // copy assignment from unshareable source
+    assert(s1.c_str() != s2.c_str()); // must deep-copy
+
+    std::cout << "  [PASS] unshareable copy assignment\n";
+}
+
+void test_wstring_instantiation() {
+    // Verify wstring compiles and works with the generic SSO layout
+    moo::wstring ws(L"Hello");
+    assert(ws.size() == 5);
+    assert(!ws.empty());
+
+    moo::wstring ws2 = ws;
+    assert(ws == ws2);
+
+    // Heap mode
+    moo::wstring ws_long(L"This is a long wide string that exceeds the SSO capacity for wchar_t!");
+    moo::wstring ws_long2 = ws_long;
+    assert(ws_long.c_str() == ws_long2.c_str()); // COW shared
+
+    ws_long2[0] = L'X';
+    assert(ws_long.c_str() != ws_long2.c_str()); // detached
+
+    std::cout << "  [PASS] wstring instantiation\n";
+}
+
+void test_u16string_instantiation() {
+    moo::u16string us(u"Hello");
+    assert(us.size() == 5);
+
+    moo::u16string us2 = us;
+    assert(us == us2);
+
+    std::cout << "  [PASS] u16string instantiation\n";
+}
+
 int main() {
     std::cout << "=== basic_string_cow Test Suite ===\n\n";
 
@@ -612,6 +699,12 @@ int main() {
     test_multiple_detach_cycles();
     test_scope_destruction_order();
     test_thread_safe_string();
+    test_unshareable_escaping_reference();
+    test_unshareable_via_data();
+    test_unshareable_via_begin();
+    test_unshareable_copy_assignment();
+    test_wstring_instantiation();
+    test_u16string_instantiation();
 
     std::cout << "\n=== All tests passed! ===\n";
     return 0;
